@@ -130,7 +130,6 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 				logrus.Errorf("%s: failed saving state on start failure: %v", container.ID, err)
 			}
 			container.Reset(false)
-
 			daemon.Cleanup(container)
 			// if containers AutoRemove flag is set, remove it after clean up
 			if container.HostConfig.AutoRemove {
@@ -150,7 +149,17 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 	if err := daemon.initializeNetworking(container); err != nil {
 		return err
 	}
-
+	// cNetworkConfig := container.NetworkSettings.Networks["bridge"]
+	// if cNetworkConfig != nil {
+	// 	ipAddress := cNetworkConfig.IPAddress
+	// 	if ipAddress != "" {
+	// 		logrus.Infof("ipAddress is %v", ipAddress)
+	// 	}
+	// }
+	if err := daemon.initBandWidthLimit(container); err != nil {
+		logrus.Errorf("start.go 162 error is %v", err)
+		return err
+	}
 	spec, err := daemon.createSpec(container)
 	if err != nil {
 		return errdefs.System(err)
