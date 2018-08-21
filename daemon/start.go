@@ -151,6 +151,18 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 		return err
 	}
 
+	// cNetworkConfig := container.NetworkSettings.Networks["bridge"]
+	// if cNetworkConfig != nil {
+	// 	ipAddress := cNetworkConfig.IPAddress
+	// 	if ipAddress != "" {
+	// 		logrus.Infof("ipAddress is %v", ipAddress)
+	// 	}
+	// }
+	if err := daemon.initBandWidthLimit(container); err != nil {
+		logrus.Errorf("start.go 162 error is %v", err)
+		return err
+	}
+
 	spec, err := daemon.createSpec(container)
 	if err != nil {
 		return errdefs.System(err)

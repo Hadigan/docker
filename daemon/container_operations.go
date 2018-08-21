@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -731,7 +734,11 @@ func (daemon *Daemon) connectToNetwork(container *container.Container, idOrName 
 	}
 
 	controller := daemon.netController
+	//Sandbox在linux中的实现是namespace
+	// 这里先检查一下是否已经为这个容器创建了sandbox
+	// 如果没有就在下面新建立一个sandbox
 	sb := daemon.getNetworkSandbox(container)
+	//生成网络配置参数的地方
 	createOptions, err := buildCreateEndpointOptions(container, n, endpointConfig, sb, daemon.configStore.DNS)
 	if err != nil {
 		return err
@@ -760,7 +767,7 @@ func (daemon *Daemon) connectToNetwork(container *container.Container, idOrName 
 	if err := daemon.updateEndpointNetworkSettings(container, n, ep); err != nil {
 		return err
 	}
-
+	//如果还没有创建过sandbox，就在这里新创建一个
 	if sb == nil {
 		options, err := daemon.buildSandboxOptions(container)
 		if err != nil {
@@ -1138,5 +1145,230 @@ func getNetworkID(name string, endpointSettings *networktypes.EndpointSettings) 
 func updateSandboxNetworkSettings(c *container.Container, sb libnetwork.Sandbox) error {
 	c.NetworkSettings.SandboxID = sb.ID()
 	c.NetworkSettings.SandboxKey = sb.Key()
+	return nil
+}
+
+func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
+	hostConfig := container.HostConfig
+	networkConfig := container.NetworkSettings.Networks["bridge"]
+	if networkConfig == nil {
+		return fmt.Errorf("bandwidth can not support network mode is not bridge")
+	}
+	IPAddress := networkConfig.IPAddress
+	bandwidthUpRate := hostConfig.Resources.NetBWUpRate
+	bandwidthUpCeil := hostConfig.Resources.NetBWUpCeil
+	bandwidthDownRate := hostConfig.Resources.NetBWDownRate
+	bandwidthDownCeil := hostConfig.Resources.NetBWDownCeil
+	logrus.Infof("container ip is %v", IPAddress)
+	logrus.Infof("uprate is %v", bandwidthUpRate)
+	logrus.Infof("upceil is %v", bandwidthUpCeil)
+	logrus.Infof("downrate is %v", bandwidthDownRate)
+	logrus.Infof("downceil is %v", bandwidthDownCeil)
+	if IPAddress == "" {
+		return fmt.Errorf("can not limit bandwidth of container which has a none ip")
+	}
+	if err := checkBWLimitInit(); err != nil {
+		return err
+	}
+	if err := setBandWidth(IPAddress, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil); err != nil {
+		return err
+	}
+	return nil
+}
+
+//检查带宽限制的全局设置，例如docker0是否配置了htb
+//docker0是否配置了ingress
+//ifb模块是否已经加载
+//ifb0是否已经启动
+func checkBWLimitInit() error {
+	outTmp, err := exec.Command("tc", "qdisc", "show").Output()
+	if err != nil {
+		logrus.Errorf("1196%v", err)
+		return err
+	}
+	out1 := string(outTmp)
+	//检查是否已经为docker0配置了htb
+	docker0ConfigHTB, err := regexp.MatchString("htb 172: dev docker0 root", out1)
+	if err != nil {
+		logrus.Errorf("1203%v", err)
+		return err
+	}
+	if docker0ConfigHTB == false {
+		//先执行删除qdisc命令，防止设置了其他的qdisc
+		_, err = exec.Command("tc", "qdisc", "del", "dev", "docker0", "root").Output()
+		if err != nil {
+			logrus.Errorf("1210%v", err)
+			logrus.Info("docker0 has no htb")
+			// return err
+		}
+		//为docker0配置htb，handle固定为172号
+		_, err = exec.Command("tc", "qdisc", "add", "dev", "docker0", "root", "handle", "172:", "htb").Output()
+		if err != nil {
+			logrus.Errorf("1216%v", err)
+			return err
+		}
+		//建立根分类
+		_, err = exec.Command("tc", "class", "add", "dev", "docker0", "parent",
+			"172:", "classid", "172:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+		if err != nil {
+			logrus.Errorf("1223%v", err)
+			return err
+		}
+	}
+	//是否为docker0配置了ingress
+	docker0ConfigIngress, err := regexp.MatchString("ingress ffff: dev docker0", out1)
+	if err != nil {
+		logrus.Errorf("1230%v", err)
+		return err
+	}
+	if docker0ConfigIngress == false {
+		//为docker0配置ingress
+		_, err = exec.Command("tc", "qdisc", "add", "dev", "docker0", "handle", "ffff:", "ingress").Output()
+		if err != nil {
+			logrus.Errorf("1237%v", err)
+			return err
+		}
+	}
+	//是否加载并配置了ifb0
+	configIfb0, err := regexp.MatchString("htb 173: dev ifb0 root", out1)
+	if err != nil {
+		logrus.Errorf("1244%v", err)
+		return err
+	}
+	if configIfb0 == false {
+		//加载ifb模块
+		_, err = exec.Command("modprobe", "ifb").Output()
+		if err != nil {
+			logrus.Errorf("1251%v", err)
+			return err
+		}
+		//启动ifb0接口
+		_, err = exec.Command("ip", "link", "set", "ifb0", "up").Output()
+		if err != nil {
+			logrus.Errorf("1257%v", err)
+			return err
+		}
+		//将docker0的下行流量重定向到ifb0
+		_, err = exec.Command("tc", "filter", "add", "dev", "docker0",
+			"parent", "ffff:", "protocol", "ip", "u32", "match", "u32",
+			"0", "0", "action", "mirred", "egress", "redirect", "dev", "ifb0").Output()
+		if err != nil {
+			logrus.Errorf("1265%v", err)
+			return err
+		}
+		_, err = exec.Command("tc", "qdisc", "del", "dev", "ifb0", "root").Output()
+		if err != nil {
+			logrus.Errorf("1270%v", err)
+			//可能没有这个东西就会报错，报错不返回
+			// return err
+		}
+		//为ifb0配置htb
+		_, err = exec.Command("tc", "qdisc", "add", "dev", "ifb0", "root", "handle", "173:", "htb").Output()
+		if err != nil {
+			logrus.Errorf("1270%v", err)
+			return err
+		}
+		//添加根分类
+		_, err = exec.Command("tc", "class", "add", "dev", "ifb0", "parent",
+			"173:", "classid", "173:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+		if err != nil {
+			logrus.Errorf("1283%v", err)
+			return err
+		}
+	}
+	return nil
+}
+func getChildClassId(IPAddress string) (string, error) {
+	if IPAddress == "" {
+		return "", fmt.Errorf("can not limit bandwidth of container which has a none ip")
+	}
+	IPSplit := strings.Split(IPAddress, ".")
+	if len(IPSplit) != 4 {
+		return "", fmt.Errorf("ipaddress is no right like x.x.x.x")
+	}
+	classIdHigh, err := strconv.Atoi(IPSplit[2])
+	if err != nil {
+		return "", err
+	}
+	classIdLow, err := strconv.Atoi(IPSplit[3])
+	if err != nil {
+		return "", err
+	}
+	childClassId := strconv.Itoa((classIdHigh << 8) + classIdLow)
+	return childClassId, nil
+}
+func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error {
+	classId, err := getChildClassId(IPAddr)
+	if err != nil {
+		return err
+	}
+	if upRate < 0 || downRate < 0 {
+		return fmt.Errorf("upRate or downRate < 0")
+	}
+	if upCeil < upRate {
+		upCeil = upRate
+	}
+	if downCeil < downRate {
+		downCeil = downRate
+	}
+	//不管原先有没有配置先删除原来的配置
+	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "protocol", "ip",
+		"parent", "172:", "prio", "1", "u32", "match", "ip", "dst",
+		IPAddr+"/32", "flowid", "172:"+classId).Output()
+	if err != nil {
+		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
+		// return err
+	}
+	_, err = exec.Command("tc", "class", "del", "dev", "docker0", "parent",
+		"172:1", "classid", "172:"+classId, "htb", "rate", "1mbit").Output()
+	if err != nil {
+		//如果原来没有配置class的话，执行删除操作会报错，因此这里不要return err
+		// return err
+	}
+	_, err = exec.Command("tc", "filter", "del", "dev", "ifb0", "protocol", "ip",
+		"parent", "173:", "prio", "1", "u32", "match", "ip", "src",
+		IPAddr+"/32", "flowid", "173:"+classId).Output()
+	if err != nil {
+		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
+		// return err
+	}
+	_, err = exec.Command("tc", "class", "del", "dev", "ifb0", "parent",
+		"173:1", "classid", "173:"+classId, "htb", "rate", "1mbit").Output()
+	if err != nil {
+		//如果原来没有配置class的话，执行删除操作会报错，因此这里不要return err
+		// return err
+	}
+	if downRate > 0 {
+		_, err = exec.Command("tc", "class", "add", "dev", "docker0",
+			"parent", "172:1", "classid", "172:"+classId, "htb",
+			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit").Output()
+		if err != nil {
+			logrus.Errorf("1361%v", err)
+			return err
+		}
+		_, err = exec.Command("tc", "filter", "add", "dev", "docker0", "protocol", "ip",
+			"parent", "172:", "prio", "1", "u32", "match", "ip", "dst", IPAddr+"/32",
+			"flowid", "172:"+classId).Output()
+		if err != nil {
+			logrus.Errorf("1369%v", err)
+			return err
+		}
+	}
+	if upRate > 0 {
+		_, err = exec.Command("tc", "class", "add", "dev", "ifb0",
+			"parent", "173:1", "classid", "173:"+classId, "htb",
+			"rate", strconv.FormatInt(upRate, 10)+"bit", "ceil", strconv.FormatInt(upCeil, 10)+"bit").Output()
+		if err != nil {
+			logrus.Errorf("1379%v", err)
+			return err
+		}
+		_, err = exec.Command("tc", "filter", "add", "dev", "ifb0", "protocol", "ip",
+			"parent", "173:", "prio", "1", "u32", "match", "ip", "src", IPAddr+"/32",
+			"flowid", "173:"+classId).Output()
+		if err != nil {
+			logrus.Errorf("1387%v", err)
+			return err
+		}
+	}
 	return nil
 }

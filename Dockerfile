@@ -32,6 +32,8 @@ ENV GO_VERSION 1.10.3
 ARG APT_MIRROR=deb.debian.org
 RUN sed -ri "s/(httpredir|deb).debian.org/$APT_MIRROR/g" /etc/apt/sources.list
 
+RUN rm /etc/apt/sources.list && echo 'deb http://mirrors.163.com/debian/  stretch main' >> /etc/apt/sources.list && echo 'deb http://mirrors.163.com/debian/  stretch-updates main'  >> /etc/apt/sources.list && echo 'deb http://mirrors.163.com/debian-security/  stretch/updates main' >> /etc/apt/sources.list
+
 FROM base AS criu
 # Install CRIU for checkpoint/restore support
 ENV CRIU_VERSION 3.6
@@ -99,12 +101,14 @@ FROM base AS frozen-images
 RUN apt-get update && apt-get install -y jq ca-certificates --no-install-recommends
 # Get useful and necessary Hub images so we can "docker load" locally instead of pulling
 COPY contrib/download-frozen-image-v2.sh /
-RUN /download-frozen-image-v2.sh /build \
-	buildpack-deps:jessie@sha256:dd86dced7c9cd2a724e779730f0a53f93b7ef42228d4344b25ce9a42a1486251 \
-	busybox:latest@sha256:bbc3a03235220b170ba48a157dd097dd1379299370e1ed99ce976df0355d24f0 \
-	busybox:glibc@sha256:0b55a30394294ab23b9afd58fab94e61a923f5834fba7ddbae7f8e0c11ba85e6 \
-	debian:jessie@sha256:287a20c5f73087ab406e6b364833e3fb7b3ae63ca0eb3486555dc27ed32c6e60 \
-	hello-world:latest@sha256:be0cd392e45be79ffeffa6b05338b98ebb16c87b255f48e297ec7f98e123905c
+
+# RUN /download-frozen-image-v2.sh /build \
+# 	buildpack-deps:jessie@sha256:dd86dced7c9cd2a724e779730f0a53f93b7ef42228d4344b25ce9a42a1486251 \
+# 	busybox:latest@sha256:bbc3a03235220b170ba48a157dd097dd1379299370e1ed99ce976df0355d24f0 \
+# 	busybox:glibc@sha256:0b55a30394294ab23b9afd58fab94e61a923f5834fba7ddbae7f8e0c11ba85e6 \
+# 	debian:jessie@sha256:287a20c5f73087ab406e6b364833e3fb7b3ae63ca0eb3486555dc27ed32c6e60 \
+# 	hello-world:latest@sha256:be0cd392e45be79ffeffa6b05338b98ebb16c87b255f48e297ec7f98e123905c
+
 # See also ensureFrozenImagesLinux() in "integration-cli/fixtures_linux_daemon_test.go" (which needs to be updated when adding images to this list)
 
 # Just a little hack so we don't have to install these deps twice, once for runc and once for dockerd
@@ -209,7 +213,7 @@ RUN apt-get update && apt-get install -y \
 	xz-utils \
 	--no-install-recommends
 COPY --from=swagger /build/swagger* /usr/local/bin/
-COPY --from=frozen-images /build/ /docker-frozen-images
+# COPY --from=frozen-images /build/ /docker-frozen-images
 COPY --from=gometalinter /build/ /usr/local/bin/
 COPY --from=tomlv /build/ /usr/local/bin/
 COPY --from=vndr /build/ /usr/local/bin/
