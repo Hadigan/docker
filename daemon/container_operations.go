@@ -1154,12 +1154,16 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 	if networkConfig == nil {
 		return fmt.Errorf("bandwidth can not support network mode is not bridge")
 	}
+	IPGateWay := networkConfig.Gateway
 	IPAddress := networkConfig.IPAddress
 	bandwidthUpRate := hostConfig.Resources.NetBWUpRate
 	bandwidthUpCeil := hostConfig.Resources.NetBWUpCeil
 	bandwidthDownRate := hostConfig.Resources.NetBWDownRate
 	bandwidthDownCeil := hostConfig.Resources.NetBWDownCeil
+	devName, _ := getDevName(IPAddress, IPGateWay)
 	logrus.Infof("container ip is %v", IPAddress)
+	logrus.Infof("ipgateway is %v", IPGateWay)
+	logrus.Infof("devName is %v", devName)
 	logrus.Infof("uprate is %v", bandwidthUpRate)
 	logrus.Infof("upceil is %v", bandwidthUpCeil)
 	logrus.Infof("downrate is %v", bandwidthDownRate)
@@ -1167,10 +1171,10 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 	if IPAddress == "" {
 		return fmt.Errorf("can not limit bandwidth of container which has a none ip")
 	}
-	if err := checkBWLimitInit(); err != nil {
+	if err := checkBWLimitInit(devName); err != nil {
 		return err
 	}
-	if err := setBandWidth(IPAddress, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil); err != nil {
+	if err := setBandWidth(IPAddress, devName, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil); err != nil {
 		return err
 	}
 	return nil
@@ -1180,7 +1184,7 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 //docker0是否配置了ingress
 //ifb模块是否已经加载
 //ifb0是否已经启动
-func checkBWLimitInit() error {
+func checkBWLimitInit(devName string) error {
 	outTmp, err := exec.Command("tc", "qdisc", "show").Output()
 	if err != nil {
 		logrus.Errorf("1196%v", err)
@@ -1188,27 +1192,27 @@ func checkBWLimitInit() error {
 	}
 	out1 := string(outTmp)
 	//检查是否已经为docker0配置了htb
-	docker0ConfigHTB, err := regexp.MatchString("htb 172: dev docker0 root", out1)
+	docker0ConfigHTB, err := regexp.MatchString("htb 172: dev "+devName+" root", out1)
 	if err != nil {
 		logrus.Errorf("1203%v", err)
 		return err
 	}
 	if docker0ConfigHTB == false {
 		//先执行删除qdisc命令，防止设置了其他的qdisc
-		_, err = exec.Command("tc", "qdisc", "del", "dev", "docker0", "root").Output()
+		_, err = exec.Command("tc", "qdisc", "del", "dev", devName, "root").Output()
 		if err != nil {
 			logrus.Errorf("1210%v", err)
-			logrus.Info("docker0 has no htb")
+			logrus.Info(devName + "has no htb")
 			// return err
 		}
 		//为docker0配置htb，handle固定为172号
-		_, err = exec.Command("tc", "qdisc", "add", "dev", "docker0", "root", "handle", "172:", "htb").Output()
+		_, err = exec.Command("tc", "qdisc", "add", "dev", devName, "root", "handle", "172:", "htb").Output()
 		if err != nil {
 			logrus.Errorf("1216%v", err)
 			return err
 		}
 		//建立根分类
-		_, err = exec.Command("tc", "class", "add", "dev", "docker0", "parent",
+		_, err = exec.Command("tc", "class", "add", "dev", devName, "parent",
 			"172:", "classid", "172:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
 		if err != nil {
 			logrus.Errorf("1223%v", err)
@@ -1216,14 +1220,14 @@ func checkBWLimitInit() error {
 		}
 	}
 	//是否为docker0配置了ingress
-	docker0ConfigIngress, err := regexp.MatchString("ingress ffff: dev docker0", out1)
+	docker0ConfigIngress, err := regexp.MatchString("ingress ffff: dev "+devName, out1)
 	if err != nil {
 		logrus.Errorf("1230%v", err)
 		return err
 	}
 	if docker0ConfigIngress == false {
 		//为docker0配置ingress
-		_, err = exec.Command("tc", "qdisc", "add", "dev", "docker0", "handle", "ffff:", "ingress").Output()
+		_, err = exec.Command("tc", "qdisc", "add", "dev", devName, "handle", "ffff:", "ingress").Output()
 		if err != nil {
 			logrus.Errorf("1237%v", err)
 			return err
@@ -1249,7 +1253,7 @@ func checkBWLimitInit() error {
 			return err
 		}
 		//将docker0的下行流量重定向到ifb0
-		_, err = exec.Command("tc", "filter", "add", "dev", "docker0",
+		_, err = exec.Command("tc", "filter", "add", "dev", devName,
 			"parent", "ffff:", "protocol", "ip", "u32", "match", "u32",
 			"0", "0", "action", "mirred", "egress", "redirect", "dev", "ifb0").Output()
 		if err != nil {
@@ -1297,7 +1301,7 @@ func getChildClassId(IPAddress string) (string, error) {
 	childClassId := strconv.Itoa((classIdHigh << 8) + classIdLow)
 	return childClassId, nil
 }
-func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error {
+func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downCeil int64) error {
 	classId, err := getChildClassId(IPAddr)
 	if err != nil {
 		return err
@@ -1312,14 +1316,14 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 		downCeil = downRate
 	}
 	//不管原先有没有配置先删除原来的配置
-	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "protocol", "ip",
+	_, err = exec.Command("tc", "filter", "del", "dev", devName, "protocol", "ip",
 		"parent", "172:", "prio", "1", "u32", "match", "ip", "dst",
 		IPAddr+"/32", "flowid", "172:"+classId).Output()
 	if err != nil {
 		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
 		// return err
 	}
-	_, err = exec.Command("tc", "class", "del", "dev", "docker0", "parent",
+	_, err = exec.Command("tc", "class", "del", "dev", devName, "parent",
 		"172:1", "classid", "172:"+classId, "htb", "rate", "1mbit").Output()
 	if err != nil {
 		//如果原来没有配置class的话，执行删除操作会报错，因此这里不要return err
@@ -1339,14 +1343,14 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 		// return err
 	}
 	if downRate > 0 {
-		_, err = exec.Command("tc", "class", "add", "dev", "docker0",
+		_, err = exec.Command("tc", "class", "add", "dev", devName,
 			"parent", "172:1", "classid", "172:"+classId, "htb",
 			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit").Output()
 		if err != nil {
 			logrus.Errorf("1361%v", err)
 			return err
 		}
-		_, err = exec.Command("tc", "filter", "add", "dev", "docker0", "protocol", "ip",
+		_, err = exec.Command("tc", "filter", "add", "dev", devName, "protocol", "ip",
 			"parent", "172:", "prio", "1", "u32", "match", "ip", "dst", IPAddr+"/32",
 			"flowid", "172:"+classId).Output()
 		if err != nil {
@@ -1371,4 +1375,24 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 		}
 	}
 	return nil
+}
+func getDevName(ipAddress string, ipGateway string) (string, error) {
+	var devName string
+	if ipGateway == "" {
+		ipSlices := strings.Split(ipAddress, ".")
+		ipGateway = ipSlices[0] + "." + ipSlices[1] + ".0.1"
+	}
+	outTmp, err := exec.Command("ip", "address").Output()
+	if err != nil {
+		return "", err
+	}
+	devPattern := "inet " + ipGateway + ".* global (.*)"
+	re := regexp.MustCompile(devPattern)
+	reSlices := re.FindStringSubmatch(string(outTmp))
+	if len(reSlices) < 2 {
+		return "", fmt.Errorf("no dev match")
+	} else {
+		devName = reSlices[1]
+	}
+	return devName, nil
 }
