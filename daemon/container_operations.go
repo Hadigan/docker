@@ -1159,18 +1159,20 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 	bandwidthUpCeil := hostConfig.Resources.NetBWUpCeil
 	bandwidthDownRate := hostConfig.Resources.NetBWDownRate
 	bandwidthDownCeil := hostConfig.Resources.NetBWDownCeil
+	netPrio := hostConfig.Resources.NetPrio
 	logrus.Infof("container ip is %v", IPAddress)
 	logrus.Infof("uprate is %v", bandwidthUpRate)
 	logrus.Infof("upceil is %v", bandwidthUpCeil)
 	logrus.Infof("downrate is %v", bandwidthDownRate)
 	logrus.Infof("downceil is %v", bandwidthDownCeil)
+	logrus.Infof("network prio is %v", netPrio)
 	if IPAddress == "" {
 		return fmt.Errorf("can not limit bandwidth of container which has a none ip")
 	}
 	if err := checkBWLimitInit(); err != nil {
 		return err
 	}
-	if err := setBandWidth(IPAddress, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil); err != nil {
+	if err := setBandWidth(IPAddress, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil, netPrio); err != nil {
 		return err
 	}
 	return nil
@@ -1297,7 +1299,7 @@ func getChildClassId(IPAddress string) (string, error) {
 	childClassId := strconv.Itoa((classIdHigh << 8) + classIdLow)
 	return childClassId, nil
 }
-func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error {
+func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64, netPrio uint) error {
 	classId, err := getChildClassId(IPAddr)
 	if err != nil {
 		return err
@@ -1310,6 +1312,9 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 	}
 	if downCeil < downRate {
 		downCeil = downRate
+	}
+	if netPrio > 7 {
+		netPrio = 7
 	}
 	//不管原先有没有配置先删除原来的配置
 	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "protocol", "ip",
@@ -1341,7 +1346,7 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 	if downRate > 0 {
 		_, err = exec.Command("tc", "class", "add", "dev", "docker0",
 			"parent", "172:1", "classid", "172:"+classId, "htb",
-			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit").Output()
+			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit", "prio", strconv.Itoa(int(netPrio))).Output()
 		if err != nil {
 			logrus.Errorf("1361%v", err)
 			return err
@@ -1357,7 +1362,7 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64) error
 	if upRate > 0 {
 		_, err = exec.Command("tc", "class", "add", "dev", "ifb0",
 			"parent", "173:1", "classid", "173:"+classId, "htb",
-			"rate", strconv.FormatInt(upRate, 10)+"bit", "ceil", strconv.FormatInt(upCeil, 10)+"bit").Output()
+			"rate", strconv.FormatInt(upRate, 10)+"bit", "ceil", strconv.FormatInt(upCeil, 10)+"bit", "prio", strconv.Itoa(int(netPrio))).Output()
 		if err != nil {
 			logrus.Errorf("1379%v", err)
 			return err
