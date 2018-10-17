@@ -1299,8 +1299,36 @@ func getChildClassId(IPAddress string) (string, error) {
 	childClassId := strconv.Itoa((classIdHigh << 8) + classIdLow)
 	return childClassId, nil
 }
+func getFilterHandle(classID string) (string, string, error) {
+	//先做down
+	downFilterHandle := ""
+	upFilterHandle := ""
+	outTmp, err := exec.Command("tc", "filter", "show", "dev", "docker0").Output()
+	if err != nil {
+		return "", "", err
+	}
+	downPattern := "fh (.*) order.*flowid 172:" + classID
+	re := regexp.MustCompile(downPattern)
+	downResults := re.FindStringSubmatch(string(outTmp))
+	if len(downResults) >= 2 {
+		downFilterHandle = downResults[1]
+	}
+
+	upOutTmp, err := exec.Command("tc", "filter", "show", "dev", "ifb0").Output()
+	if err != nil {
+		return "", "", err
+	}
+	upPattern := "fh (.*) order.*flowid 173:" + classID
+	upRe := regexp.MustCompile(upPattern)
+	upResults := upRe.FindStringSubmatch(string(upOutTmp))
+	if len(upResults) >= 2 {
+		upFilterHandle = upResults[1]
+	}
+	return downFilterHandle, upFilterHandle, nil
+}
 func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64, netPrio uint) error {
 	classId, err := getChildClassId(IPAddr)
+	downFilterHandle, upFilterHandle, err := getFilterHandle(classId)
 	if err != nil {
 		return err
 	}
@@ -1317,9 +1345,8 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64, netPr
 		netPrio = 7
 	}
 	//不管原先有没有配置先删除原来的配置
-	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "protocol", "ip",
-		"parent", "172:", "prio", "1", "u32", "match", "ip", "dst",
-		IPAddr+"/32", "flowid", "172:"+classId).Output()
+	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "parent", "172:", "protocol", "ip",
+		"prio", "1", "handle", downFilterHandle, "u32").Output()
 	if err != nil {
 		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
 		// return err
@@ -1330,9 +1357,8 @@ func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64, netPr
 		//如果原来没有配置class的话，执行删除操作会报错，因此这里不要return err
 		// return err
 	}
-	_, err = exec.Command("tc", "filter", "del", "dev", "ifb0", "protocol", "ip",
-		"parent", "173:", "prio", "1", "u32", "match", "ip", "src",
-		IPAddr+"/32", "flowid", "173:"+classId).Output()
+	_, err = exec.Command("tc", "filter", "del", "dev", "ifb0", "parent", "173:", "protocol", "ip",
+		"prio", "1", "handle", upFilterHandle, "u32").Output()
 	if err != nil {
 		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
 		// return err
