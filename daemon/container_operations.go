@@ -1160,7 +1160,11 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 	bandwidthUpCeil := hostConfig.Resources.NetBWUpCeil
 	bandwidthDownRate := hostConfig.Resources.NetBWDownRate
 	bandwidthDownCeil := hostConfig.Resources.NetBWDownCeil
+<<<<<<< HEAD
 	devName, _ := getDevName(IPAddress, IPGateWay)
+=======
+	netPrio := hostConfig.Resources.NetPrio
+>>>>>>> dev-moby1806
 	logrus.Infof("container ip is %v", IPAddress)
 	logrus.Infof("ipgateway is %v", IPGateWay)
 	logrus.Infof("devName is %v", devName)
@@ -1168,13 +1172,18 @@ func (daemon *Daemon) initBandWidthLimit(container *container.Container) error {
 	logrus.Infof("upceil is %v", bandwidthUpCeil)
 	logrus.Infof("downrate is %v", bandwidthDownRate)
 	logrus.Infof("downceil is %v", bandwidthDownCeil)
+	logrus.Infof("network prio is %v", netPrio)
 	if IPAddress == "" {
 		return fmt.Errorf("can not limit bandwidth of container which has a none ip")
 	}
 	if err := checkBWLimitInit(devName); err != nil {
 		return err
 	}
+<<<<<<< HEAD
 	if err := setBandWidth(IPAddress, devName, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil); err != nil {
+=======
+	if err := setBandWidth(IPAddress, bandwidthUpRate, bandwidthUpCeil, bandwidthDownRate, bandwidthDownCeil, netPrio); err != nil {
+>>>>>>> dev-moby1806
 		return err
 	}
 	return nil
@@ -1212,8 +1221,13 @@ func checkBWLimitInit(devName string) error {
 			return err
 		}
 		//建立根分类
+<<<<<<< HEAD
 		_, err = exec.Command("tc", "class", "add", "dev", devName, "parent",
 			"172:", "classid", "172:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+=======
+		_, err = exec.Command("tc", "class", "add", "dev", "docker0", "parent",
+			"172:", "classid", "172:1", "htb", "rate", "100mbit", "ceil", "100mbit").Output()
+>>>>>>> dev-moby1806
 		if err != nil {
 			logrus.Errorf("1223%v", err)
 			return err
@@ -1274,7 +1288,7 @@ func checkBWLimitInit(devName string) error {
 		}
 		//添加根分类
 		_, err = exec.Command("tc", "class", "add", "dev", "ifb0", "parent",
-			"173:", "classid", "173:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+			"173:", "classid", "173:1", "htb", "rate", "100mbit", "ceil", "100mbit").Output()
 		if err != nil {
 			logrus.Errorf("1283%v", err)
 			return err
@@ -1301,8 +1315,40 @@ func getChildClassId(IPAddress string) (string, error) {
 	childClassId := strconv.Itoa((classIdHigh << 8) + classIdLow)
 	return childClassId, nil
 }
+<<<<<<< HEAD
 func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downCeil int64) error {
+=======
+func getFilterHandle(classID string) (string, string, error) {
+	//先做down
+	downFilterHandle := ""
+	upFilterHandle := ""
+	outTmp, err := exec.Command("tc", "filter", "show", "dev", "docker0").Output()
+	if err != nil {
+		return "", "", err
+	}
+	downPattern := "fh (.*) order.*flowid 172:" + classID
+	re := regexp.MustCompile(downPattern)
+	downResults := re.FindStringSubmatch(string(outTmp))
+	if len(downResults) >= 2 {
+		downFilterHandle = downResults[1]
+	}
+
+	upOutTmp, err := exec.Command("tc", "filter", "show", "dev", "ifb0").Output()
+	if err != nil {
+		return "", "", err
+	}
+	upPattern := "fh (.*) order.*flowid 173:" + classID
+	upRe := regexp.MustCompile(upPattern)
+	upResults := upRe.FindStringSubmatch(string(upOutTmp))
+	if len(upResults) >= 2 {
+		upFilterHandle = upResults[1]
+	}
+	return downFilterHandle, upFilterHandle, nil
+}
+func setBandWidth(IPAddr string, upRate, upCeil, downRate, downCeil int64, netPrio uint) error {
+>>>>>>> dev-moby1806
 	classId, err := getChildClassId(IPAddr)
+	downFilterHandle, upFilterHandle, err := getFilterHandle(classId)
 	if err != nil {
 		return err
 	}
@@ -1315,10 +1361,18 @@ func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downC
 	if downCeil < downRate {
 		downCeil = downRate
 	}
+	if netPrio > 7 {
+		netPrio = 7
+	}
 	//不管原先有没有配置先删除原来的配置
+<<<<<<< HEAD
 	_, err = exec.Command("tc", "filter", "del", "dev", devName, "protocol", "ip",
 		"parent", "172:", "prio", "1", "u32", "match", "ip", "dst",
 		IPAddr+"/32", "flowid", "172:"+classId).Output()
+=======
+	_, err = exec.Command("tc", "filter", "del", "dev", "docker0", "parent", "172:", "protocol", "ip",
+		"prio", "1", "handle", downFilterHandle, "u32").Output()
+>>>>>>> dev-moby1806
 	if err != nil {
 		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
 		// return err
@@ -1329,9 +1383,8 @@ func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downC
 		//如果原来没有配置class的话，执行删除操作会报错，因此这里不要return err
 		// return err
 	}
-	_, err = exec.Command("tc", "filter", "del", "dev", "ifb0", "protocol", "ip",
-		"parent", "173:", "prio", "1", "u32", "match", "ip", "src",
-		IPAddr+"/32", "flowid", "173:"+classId).Output()
+	_, err = exec.Command("tc", "filter", "del", "dev", "ifb0", "parent", "173:", "protocol", "ip",
+		"prio", "1", "handle", upFilterHandle, "u32").Output()
 	if err != nil {
 		//如果原来没有配置filter的话，执行删除操作会报错，因此这里不要return err
 		// return err
@@ -1345,7 +1398,7 @@ func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downC
 	if downRate > 0 {
 		_, err = exec.Command("tc", "class", "add", "dev", devName,
 			"parent", "172:1", "classid", "172:"+classId, "htb",
-			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit").Output()
+			"rate", strconv.FormatInt(downRate, 10)+"bit", "ceil", strconv.FormatInt(downCeil, 10)+"bit", "prio", strconv.Itoa(int(netPrio))).Output()
 		if err != nil {
 			logrus.Errorf("1361%v", err)
 			return err
@@ -1361,7 +1414,7 @@ func setBandWidth(IPAddr string, devName string, upRate, upCeil, downRate, downC
 	if upRate > 0 {
 		_, err = exec.Command("tc", "class", "add", "dev", "ifb0",
 			"parent", "173:1", "classid", "173:"+classId, "htb",
-			"rate", strconv.FormatInt(upRate, 10)+"bit", "ceil", strconv.FormatInt(upCeil, 10)+"bit").Output()
+			"rate", strconv.FormatInt(upRate, 10)+"bit", "ceil", strconv.FormatInt(upCeil, 10)+"bit", "prio", strconv.Itoa(int(netPrio))).Output()
 		if err != nil {
 			logrus.Errorf("1379%v", err)
 			return err

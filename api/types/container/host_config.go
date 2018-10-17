@@ -339,6 +339,7 @@ type Resources struct {
 	NetBWUpCeil          int64
 	NetBWDownRate        int64
 	NetBWDownCeil        int64
+	NetPrio              uint
 
 	// Applicable to Windows
 	CPUCount           int64  `json:"CpuCount"`   // CPU count
