@@ -1211,7 +1211,7 @@ func checkBWLimitInit() error {
 		}
 		//建立根分类
 		_, err = exec.Command("tc", "class", "add", "dev", "docker0", "parent",
-			"172:", "classid", "172:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+			"172:", "classid", "172:1", "htb", "rate", "100mbit", "ceil", "100mbit").Output()
 		if err != nil {
 			logrus.Errorf("1223%v", err)
 			return err
@@ -1272,7 +1272,7 @@ func checkBWLimitInit() error {
 		}
 		//添加根分类
 		_, err = exec.Command("tc", "class", "add", "dev", "ifb0", "parent",
-			"173:", "classid", "173:1", "htb", "rate", "1000gbit", "ceil", "1000gbit").Output()
+			"173:", "classid", "173:1", "htb", "rate", "100mbit", "ceil", "100mbit").Output()
 		if err != nil {
 			logrus.Errorf("1283%v", err)
 			return err
